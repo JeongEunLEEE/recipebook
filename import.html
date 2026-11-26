@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>레시피북 가져오기</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&family=Noto+Serif+KR:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script src="config.js"></script>
+<script src="supa-shim.js"></script>
+<style>
+:root{--wall:#faf7f1;--ink:#3b3742;--mute:#8b8590;--line:#e8e3da;--pink:#f7b9cb;--pinkt:#d4628a}
+body{margin:0;background:var(--wall);color:var(--ink);font:15px/1.6 "Noto Sans KR",system-ui,sans-serif}
+main{max-width:640px;margin:40px auto;padding:0 16px}
+.box{background:#fff;border:1px solid var(--line);border-radius:14px;padding:24px;display:grid;gap:14px}
+h1{font-family:"Noto Serif KR",serif;font-weight:400;font-size:28px;margin:0}
+p,li{color:var(--mute);font-size:14px;margin:0}
+ol{margin:0;padding-left:20px;display:grid;gap:4px}
+input[type=file]{border:1px dashed var(--line);border-radius:10px;padding:14px;background:#fcfbf8}
+button{height:46px;border:0;border-radius:999px;background:var(--pink);font-weight:600;font-size:15px;cursor:pointer}
+button:disabled{opacity:.5;cursor:default}
+.bar{height:8px;border-radius:4px;background:var(--line);overflow:hidden}.bar div{height:100%;width:0;background:var(--pinkt);transition:width .2s}
+#log{font-size:13px;color:var(--ink);white-space:pre-wrap;min-height:20px}
+a{color:var(--pinkt)}
+</style>
+</head>
+<body>
+<main>
+  <div class="box">
+    <h1>Claude 레시피북에서 가져오기</h1>
+    <ol>
+      <li>Claude 레시피북(컴퓨터 화면) 왼쪽 아래 <b>💾 백업 내보내기</b>로 zip 파일을 받아요.</li>
+      <li>아래에서 그 zip 파일을 고르고 <b>가져오기</b>를 눌러요.</li>
+      <li>끝나면 <a href="./">레시피북으로 돌아가기</a>.</li>
+    </ol>
+    <p>같은 레시피·일기는 Claude 쪽 내용으로 덮어써요. 웹사이트에서만 새로 만든 기록은 그대로 남고, 지우지 않아요. 사진이 많으면 몇 분 걸려요. 창을 닫지 마세요.</p>
+    <input type="file" id="zip" accept=".zip,application/zip">
+    <button id="go" disabled>가져오기</button>
+    <div class="bar"><div id="bar"></div></div>
+    <div id="log">로그인을 확인하는 중…</div>
+  </div>
+</main>
+<script>
+(async()=>{
+  const log=t=>document.getElementById('log').textContent=t, bar=p=>document.getElementById('bar').style.width=Math.round(p*100)+'%';
+  const db=await window.claude.use('db');
+  if(!db){log('로그인이 필요해요.');return}
+  const sb=window.__sb, go=document.getElementById('go'), inp=document.getElementById('zip');
+  log('zip 파일을 골라 주세요.');
+  inp.onchange=()=>{go.disabled=!inp.files.length};
+  go.onclick=async()=>{
+    go.disabled=true;inp.disabled=true;
+    try{
+      log('zip 여는 중…');
+      const zip=await JSZip.loadAsync(inp.files[0]);
+      const meta=JSON.parse(await zip.file('data.json').async('string'));
+      if(meta.app!=='jungwon-recipebook')throw new Error('레시피북 백업 파일이 아니에요.');
+      const photos=Object.keys(zip.files).filter(n=>n.startsWith('photos/')&&!zip.files[n].dir);
+      const rows=[];Object.entries(meta.collections||{}).forEach(([col,list])=>(list||[]).forEach(d=>{const {id,...data}=d;if(id)rows.push({col,id,data})}));
+      const total=photos.length+rows.length;let done=0,fail=0;
+      for(let i=0;i<photos.length;i+=4){
+        await Promise.all(photos.slice(i,i+4).map(async n=>{
+          const id=n.slice(7);
+          try{
+            const blob=await zip.file(n).async('blob');
+            const type=(meta.mediaTypes||{})[id]||'image/jpeg';
+            const r=await sb.storage.from('photos').upload(id,blob,{contentType:type,upsert:true});
+            if(r.error)throw r.error;
+          }catch(e){fail++;console.warn(id,e)}
+          done++;bar(done/total);log(`사진 올리는 중 ${done}/${photos.length}`);
+        }));
+      }
+      for(let i=0;i<rows.length;i+=50){
+        const r=await sb.from('docs').upsert(rows.slice(i,i+50));
+        if(r.error)throw r.error;
+        done+=Math.min(50,rows.length-i);bar(done/total);log(`기록 저장 중 ${Math.min(i+50,rows.length)}/${rows.length}`);
+      }
+      bar(1);
+      const c=meta.collections||{};
+      log(`완료! 레시피 ${(c.recipes||[]).length}개 · 해볼 것 ${(c.wishes||[]).length}개 · 요리일기 ${(c.memories||[]).length}개 · 외식 ${(c.restaurants||[]).length}곳 · 사진 ${photos.length-fail}장${fail?` (실패 ${fail}장, 다시 가져오기를 누르면 이어서 올라가요)`:''}`);
+    }catch(e){log('가져오지 못했어요: '+(e&&e.message||e))}
+    go.disabled=false;inp.disabled=false;
+  };
+})();
+</script>
+</body>
+</html>
